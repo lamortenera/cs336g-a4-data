@@ -1,15 +1,16 @@
 import argparse
 import gzip
-from random import random
+import random
 from cs336_data.sample_urls import count_lines
 from fastwarc.warc import ArchiveIterator, WarcRecordType
+import assignment
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--positive_warc", type=str, help="Path to the positive .warc.gz file"
 )
 parser.add_argument(
-    "negative_warc", type=str, help="Path to the negative .warc.gz file"
+    "--negative_warc", type=str, help="Path to the negative .warc.gz file"
 )
 parser.add_argument(
     "--max_per_class", type=int, help="Maximum number of samples to include per class",
@@ -26,7 +27,24 @@ def record_generator(file_path):
     """Generator that yields records from a .warc.gz file."""
     with open(file_path, "rb") as f:
         for record in ArchiveIterator(f, record_types=WarcRecordType.response):
-            yield record
+            content = record.reader.read()
+            try:
+                text = assignment.extract_text(content)
+            except Exception as e:
+                continue
+            text_no_newline = text.replace("\n", " ")
+            language, confidence = assignment.identify_language(text_no_newline, normalized=True)
+            if language != "en":
+                continue
+            if not assignment.gopher_quality_filter(text):
+                continue
+            nsfw_label, nsfw_confidence = assignment.classify_nsfw(text_no_newline, normalized=True)
+            if nsfw_label == "nsfw":
+                continue
+            hate_speech_label, hate_speech_confidence = assignment.classify_hate_speech(text_no_newline, normalized=True)
+            if hate_speech_label == "hatespeech":
+                continue
+            yield text_no_newline
 
 def count_records(file_path):
     """Count total records in a .warc.gz file."""
@@ -53,7 +71,7 @@ def sample_record(positive_path, negative_path, positive_prob, positive_rate, ne
             except StopIteration:
                 break
 
-def main():
+if __name__ == "__main__":
     args = parser.parse_args()
 
     # Count total records in both files
@@ -78,9 +96,8 @@ def main():
     }    
     with open(args.train_output, "w", encoding="utf-8") as train_file, \
          open(args.test_output, "w", encoding="utf-8") as test_file:
-        for label, record in sample_record(args.positive_warc, args.negative_warc, positive_prob, positive_rate, negative_rate):
-            content = record.reader.read()
-            line = f"__label__{label}\n{content.decode('utf-8', errors='ignore').replace('\n', ' ')}\n"
+        for label, text in sample_record(args.positive_warc, args.negative_warc, positive_prob, positive_rate, negative_rate):
+            line = f"__label__{label} {text}\n"
             if random.random() < 0.9:
                 train_file.write(line)
                 sampling_stats["train_samples"][label] += 1

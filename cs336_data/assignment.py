@@ -11,9 +11,12 @@ _LANGUAGE_MODEL_PATH = _DATA_PATH / "lid.176.bin"
 _NSF_MODEL_PATH = _DATA_PATH / "jigsaw_fasttext_bigrams_nsfw_final.bin"
 _HATE_SPEECH_MODEL_PATH = _DATA_PATH / "jigsaw_fasttext_bigrams_hatespeech_final.bin"
 
-def identify_language(text: str):
-    model = fasttext.FastText.load_model(_LANGUAGE_MODEL_PATH.as_posix())
-    labels, scores = model.predict(text.replace("\n", " "))
+def identify_language(text: str, normalized=False):
+    if not hasattr(identify_language, "model"):
+        identify_language.model = fasttext.FastText.load_model(_LANGUAGE_MODEL_PATH.as_posix())
+    if not normalized:
+        text = text.replace("\n", " ")
+    labels, scores = identify_language.model.predict(text)
     best_label = labels[0].replace("__label__", "")
     return best_label, scores[0]
     
@@ -39,15 +42,21 @@ def mask_ips(text: str):
     ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
     return re.subn(ip_pattern, '|||IP_ADDRESS|||', text)
 
-def classify_nsfw(text: str):
-    model = fasttext.FastText.load_model(_NSF_MODEL_PATH.as_posix())
-    labels, scores = model.predict(text.replace("\n", " "))
+def classify_nsfw(text: str, normalized=False):
+    if not hasattr(classify_nsfw, "model"):
+        classify_nsfw.model = fasttext.FastText.load_model(_NSF_MODEL_PATH.as_posix())
+    if not normalized:
+        text = text.replace("\n", " ")
+    labels, scores = classify_nsfw.model.predict(text)
     best_label = labels[0].replace("__label__", "")
     return best_label, scores[0]
 
-def classify_hate_speech(text: str):
-    model = fasttext.FastText.load_model(_HATE_SPEECH_MODEL_PATH.as_posix())
-    labels, scores = model.predict(text.replace("\n", " "))
+def classify_hate_speech(text: str, normalized=False):
+    if not hasattr(classify_hate_speech, "model"):
+        classify_hate_speech.model = fasttext.FastText.load_model(_HATE_SPEECH_MODEL_PATH.as_posix())
+    if not normalized:
+        text = text.replace("\n", " ")
+    labels, scores = classify_hate_speech.model.predict(text)
     best_label = labels[0].replace("__label__", "")
     return best_label, scores[0]
 
