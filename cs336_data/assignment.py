@@ -15,6 +15,7 @@ _DATA_PATH = (pathlib.Path(__file__).resolve().parent.parent) / "data"
 _LANGUAGE_MODEL_PATH = _DATA_PATH / "lid.176.bin"
 _NSF_MODEL_PATH = _DATA_PATH / "jigsaw_fasttext_bigrams_nsfw_final.bin"
 _HATE_SPEECH_MODEL_PATH = _DATA_PATH / "jigsaw_fasttext_bigrams_hatespeech_final.bin"
+_QUALITY_MODEL_PATH = _DATA_PATH / "quality_model_large.bin"
 
 def identify_language(text: str, normalized=False):
     if not hasattr(identify_language, "model"):
@@ -65,10 +66,6 @@ def classify_hate_speech(text: str, normalized=False):
     best_label = labels[0].replace("__label__", "")
     return best_label, scores[0]
 
-# def get_minhash(ngrams: set[tuple[str, ...]], num_hashes: int) -> list[int]:
-#     minhash = [min(mmh3.hash128(" ".join(ngram), seed=i) for ngram in ngrams) for i in range(num_hashes)]
-#     return minhash
-
 def gopher_quality_filter(text: str) -> bool:
     """Return false if the text satisfies any of these conditions:
 
@@ -89,6 +86,15 @@ def gopher_quality_filter(text: str) -> bool:
     if sum(any(c.isalpha() for c in word) for word in words) / len(words) < 0.8:
         return False
     return True 
+
+def classify_quality(text: str, normalized=False):
+    if not hasattr(classify_quality, "model"):
+        classify_quality.model = fasttext.FastText.load_model(_QUALITY_MODEL_PATH.as_posix())
+    if not normalized:
+        text = text.replace("\n", " ")
+    labels, scores = classify_quality.model.predict(text)
+    is_good = labels[0] == "__label__positive"
+    return is_good, scores[0]
 
 def exact_line_deuplication(input_files: list[os.PathLike], 
                             output_directory: os.PathLike):
@@ -139,15 +145,15 @@ def minhash_deduplication(input_files: list[os.PathLike],
                 ngrams = [tuple(tokens[i:i+ngram_len]) for i in range(len(tokens)-ngram_len+1)]
                 hashes.append(get_minhash(ngrams, num_hashes))
         
-        hash_tables = [defaultdict([]) for _ in num_bands]
-        band_length = num_hashes / num_bands
+        hash_tables = [defaultdict(list) for _ in range(num_bands)]
+        band_length = num_hashes // num_bands
 
         for i, hash in enumerate(hashes):
-            for b in num_bands:
+            for b in range(num_bands):
                 key = tuple(hash[b*band_length:(b+1)*band_length])
                 hash_tables[b][key].append(i)
         
-        graph = defaultdict([])
+        graph = defaultdict(list)
         for table in hash_tables:
             for ids in table.values():
                 if len(ids) <= 1:
@@ -166,15 +172,13 @@ def minhash_deduplication(input_files: list[os.PathLike],
 
         cc_taken = set()
         for id, input_file in enumerate(input_files):
-            cc = id_to_cc.getdefault(id)
+            cc = id_to_cc.get(id)
             if cc is not None:
                 if cc not in cc_taken:
                     cc_taken.add(cc)
                 else:
                     continue
             output_file = output_directory / input_file.name
-            with input_file.open("r", encoding="utf-8", errors="ignore") as f_in, \
-                 output_file.open("w", encoding="utf-8") as f_out:
-                f_out.write(f_in)
+            output_file.write_bytes(input_file.read_bytes())
 
 

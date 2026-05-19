@@ -34,8 +34,10 @@ def run_classify_toxic_speech(text: str) -> tuple[Any, float]:
     return assignment.classify_hate_speech(text)
 
 
-def run_classify_quality(text: str) -> tuple[Any, float]:
-    raise NotImplementedError
+def run_classify_quality(text: str) -> tuple[bool, float]:
+    is_good, score = assignment.classify_quality(text)
+    label = "wiki" if is_good else "cc"
+    return label, score
 
 
 def run_gopher_quality_filter(text: str) -> bool:
