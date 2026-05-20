@@ -17,6 +17,7 @@ from collections.abc import Callable, Generator
 parser = argparse.ArgumentParser()
 parser.add_argument("input", help="the input WARC WET file")
 parser.add_argument("output_dir", help="the output directory for filtered records")
+parser.add_argument("--from_wet_urls", action="store_true", help="Whether to download and process .wet files from common crawl urls instead of a local file.")
 
 def increase_counter(d, key):
     d[key] = d.get(key, 0) + 1
@@ -117,14 +118,13 @@ if __name__ == "__main__":
     output_path = output_dir / "filtered_records.warc.wet.gz"
     stats_json = output_dir / "filtering_stats.json"
     print("Filtering records...")
-    stats = {}
-    # stats = filter_records(input_path, output_path)
-    # with stats_json.open("w") as json_out:
-    #     json.dump(stats, json_out)
+    stats = filter_records(input_path, output_path)
+    with stats_json.open("w") as json_out:
+        json.dump(stats, json_out)
     
-    # for key, val in stats.items():
-    #     if not isinstance(val, list):
-    #         print(f"{key}: {val}")
+    for key, val in stats.items():
+        if not isinstance(val, list):
+            print(f"{key}: {val}")
     
     print("Filtering dup lines...")
     filtered_dup_lines = output_dir / "filtered_dup_lines.warc.wet.gz"
