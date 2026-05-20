@@ -9,6 +9,7 @@ import re
 import nltk
 import mmh3
 from collections import Counter, defaultdict
+from collections.abc import Callable, Generator
 
 
 _DATA_PATH = (pathlib.Path(__file__).resolve().parent.parent) / "data"
@@ -96,8 +97,9 @@ def classify_quality(text: str, normalized=False):
     is_good = labels[0] == "__label__positive"
     return is_good, scores[0]
 
-def exact_line_deuplication(input_files: list[os.PathLike], 
-                            output_directory: os.PathLike):
+def exact_line_deduplication(
+        input_files: list[os.PathLike], 
+        output_directory: os.PathLike):
     counter = Counter()
     for input_file in input_files:
         with input_file.open("r", encoding="utf-8", errors="ignore") as f:
@@ -112,6 +114,37 @@ def exact_line_deuplication(input_files: list[os.PathLike],
                 key = mmh3.hash128(line)
                 if counter[key] == 1:
                     f_out.write(line)
+
+def exact_line_dedup_records(
+        input_records: Callable[[], Generator[tuple[object, str], None, None]]) -> Generator[tuple[object, str], None, None]:
+    counter = Counter()
+    for _, text in input_records():
+        for line in text.splitlines():
+            key = mmh3.hash128(line)
+            counter[key] += 1
+
+    for record, text in input_records():
+        filtered_lines = []
+        for line in text.splitlines():
+            key = mmh3.hash128(line)
+            if counter[key] == 1:
+                filtered_lines.append(line)
+        filtered_text = "\n".join(filtered_lines)
+        yield record, filtered_text
+
+def records_from_files(input_files: list[os.PathLike]) -> Generator[tuple[os.PathLike, str], None, None]:
+    for input_file in input_files:
+        with input_file.open("r", encoding="utf8", errors="ignore") as f:
+            yield input_file, f.read()
+
+def exact_line_dedup_files(
+        input_files: list[os.PathLike], 
+        output_directory: os.PathLike):
+    input_records = lambda : records_from_files(input_files)
+    for path, filtered_text in exact_line_dedup_records(input_records):
+        output_file = output_directory / path.name
+        with output_file.open("w", output_file) as f_out:
+            f_out.write(filtered_text)
 
 def get_minhash(ngrams: set[tuple[str, ...]], num_hashes: int) -> list[int]:
     result = []
@@ -182,3 +215,61 @@ def minhash_deduplication(input_files: list[os.PathLike],
             output_file.write_bytes(input_file.read_bytes())
 
 
+def minhash_deduplication_from_records(
+        input_records: Callable[[], Generator[tuple[object, str], None, None]],
+        num_hashes: int,
+        num_bands: int,
+        ngram_len: int,
+        jaccard_threshold: float) -> Generator[object, None, None]:
+        hashes = []
+        for _, content in input_records():
+            tokens = nltk.word_tokenize(content, preserve_line=True)
+            ngrams = [tuple(tokens[i:i+ngram_len]) for i in range(len(tokens)-ngram_len+1)]
+            hashes.append(get_minhash(ngrams, num_hashes))
+        
+        hash_tables = [defaultdict(list) for _ in range(num_bands)]
+        band_length = num_hashes // num_bands
+
+        for i, hash in enumerate(hashes):
+            for b in range(num_bands):
+                key = tuple(hash[b*band_length:(b+1)*band_length])
+                hash_tables[b][key].append(i)
+        
+        graph = defaultdict(list)
+        for table in hash_tables:
+            for ids in table.values():
+                if len(ids) <= 1:
+                    continue
+                for i, id1 in enumerate(ids):
+                    hash1 = hashes[id1]
+                    for _, id2 in enumerate(ids[i+1:]):
+                        hash2 = hashes[id2]
+                        sim = sum(h1 == h2 for h1, h2 in zip(hash1, hash2))/num_hashes
+                        if sim > jaccard_threshold:
+                            graph[id1].append(id2)
+                            graph[id2].append(id1)
+
+        id_to_cc = {}
+        connected_components(graph, id_to_cc)
+
+        cc_taken = set()
+        for id, (record_metadata, _) in enumerate(input_records):
+            cc = id_to_cc.get(id)
+            if cc is not None:
+                if cc not in cc_taken:
+                    cc_taken.add(cc)
+                else:
+                    continue
+            yield record_metadata
+
+def minhash_deduplication_from_files(input_files: list[os.PathLike],
+                          num_hashes: int,
+                          num_bands: int,
+                          ngram_len: int,
+                          jaccard_threshold: float,
+                          output_directory: os.PathLike):
+    input_records = lambda : records_from_files(input_files)
+    for path in minhash_deduplication_from_records(
+        input_records, num_hashes, num_bands, ngram_len, jaccard_threshold):
+        output_file = output_directory / path.name
+        output_file.write_bytes(path.read_bytes())
