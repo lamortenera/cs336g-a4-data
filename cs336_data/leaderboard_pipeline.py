@@ -1,6 +1,7 @@
 """Processes WARC records for the pipeline."""
 
-from fastwarc.warc import ArchiveIterator, WarcRecord, WarcRecordType, WarcWriter
+from fastwarc.warc import ArchiveIterator, WarcRecord, WarcRecordType
+from fastwarc.stream_io import GZipStream
 
 import argparse
 
@@ -22,7 +23,7 @@ def increase_counter(d, key):
 
 def append_example(d, key, example, max_examples=20):
     curr_examples = d.get(key, [])
-    curr_examples.insert(example, random.randint(0, len(curr_examples)))
+    curr_examples.insert(random.randint(0, len(curr_examples)), example)
     del curr_examples[max_examples:]
     d[key] = curr_examples
 
@@ -31,32 +32,14 @@ def modify_and_write_record(original_record, new_content_bytes, writer):
     Takes an existing fastwarc record, replaces its body with new_content_bytes,
     and writes it to a gzipped WARC file using a fastwarc writer.
     """
-    # 1. Convert your new content into a file-like bytes stream
-    new_body_stream = io.BytesIO(new_content_bytes)
-    
-    # 2. Extract and update the headers from the original record
-    # Fastwarc headers can be converted directly into a dictionary
-    new_headers = dict(original_record.headers)
-    
-    # 3. Update the Content-Length header to match the new body size
-    new_headers['Content-Length'] = str(len(new_content_bytes))
-    
-    # 4. Create the new record object
-    # Pass the original record type (e.g., WarcRecordType.response)
-    modified_record = WarcRecord(
-        headers=new_headers,
-        payload=new_body_stream,
-        record_type=original_record.record_type
-    )
-    
-    # 5. Write the record (fastwarc handles the gzipping if the writer is configured for it)
-    writer.write(modified_record)
+    original_record.set_bytes_content(new_content_bytes)
+    original_record.write(writer)
 
 def filter_records(input: pathlib.Path, output: pathlib.Path):
     stats = {}
     with input.open("rb") as f_in, output.open("wb") as f_out:
-        writer = WarcWriter(f_out, gzip=True)
-        for record in ArchiveIterator(f_in, record_types=WarcRecordType.response):
+        writer = GZipStream(f_out)
+        for record in ArchiveIterator(f_in, record_types=WarcRecordType.conversion):
             text = record.reader.read().decode("utf8")
             language, _ = assignment.identify_language(text)
             increase_counter(stats, "processed")
@@ -88,12 +71,13 @@ def filter_records(input: pathlib.Path, output: pathlib.Path):
             masked_text, _ = assignment.mask_phone_numbers(masked_text)
             masked_text, _ = assignment.mask_ips(masked_text)
             modify_and_write_record(record, masked_text.encode("utf8"), writer)
+    return stats
 
 
 def warc_records(input_files: list[pathlib.Path]) -> Generator[tuple[WarcRecord, str], None, None]:
     for input_file in input_files:
         with input_file.open("rb") as f_in:
-            for record in ArchiveIterator(f_in, record_types=WarcRecordType.response):
+            for record in ArchiveIterator(f_in, record_types=WarcRecordType.conversion):
                 yield record, record.reader.read().decode("utf8")
 
 
@@ -102,12 +86,12 @@ def remove_dup_lines(input_files: list[pathlib.Path], output_file: pathlib.Path)
     stats = {}
     filtered_records = assignment.exact_line_dedup_records(input_records)
     with output_file.open("wb") as f_out:
-        writer = WarcWriter(f_out, gzip=True)
+        writer = GZipStream(f_out)
         for record, filtered_text in filtered_records:
             increase_counter(stats, "line_filtering_before")
             if not filtered_text.strip():
-                increase_counter(stats, "line_filtering_after")
                 continue
+            increase_counter(stats, "line_filtering_after")
             modify_and_write_record(record, filtered_text.encode("utf8"), writer)
     return stats
 
@@ -120,11 +104,11 @@ def remove_neardups(input_files: list[pathlib.Path], output_file: pathlib.Path):
     )
 
     with output_file.open("wb") as f_out:
-        writer = WarcWriter(f_out, gzip=True)
+        writer = GZipStream(f_out)
         for record in filtered_records:
             increase_counter(stats, "neardup_filtering_after")
-            writer.write(record)
-
+            record.write(writer)
+    return stats
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -132,14 +116,22 @@ if __name__ == "__main__":
     output_dir = pathlib.Path(args.output_dir)
     output_path = output_dir / "filtered_records.warc.wet.gz"
     stats_json = output_dir / "filtering_stats.json"
-    stats = filter_records(input_path, output_path)
-    with stats_json.open("w") as json_out:
-        json.dump(stats, json_out)
+    print("Filtering records...")
+    stats = {}
+    # stats = filter_records(input_path, output_path)
+    # with stats_json.open("w") as json_out:
+    #     json.dump(stats, json_out)
     
+    # for key, val in stats.items():
+    #     if not isinstance(val, list):
+    #         print(f"{key}: {val}")
+    
+    print("Filtering dup lines...")
     filtered_dup_lines = output_dir / "filtered_dup_lines.warc.wet.gz"
     exact_dupes_stats = remove_dup_lines([output_path], filtered_dup_lines)
     stats.update(exact_dupes_stats)
 
+    print("Filtering neardups...")
     jaccard_filtered = output_dir / "filtered_jaccard.warc.wet.gz"
     neardup_stats = remove_neardups([filtered_dup_lines], jaccard_filtered)
     
