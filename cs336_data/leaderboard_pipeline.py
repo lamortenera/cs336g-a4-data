@@ -1,7 +1,7 @@
 """Processes WARC records for the pipeline."""
 
 import shutil
-from time import time
+import time
 
 from fastwarc.warc import ArchiveIterator, WarcRecord, WarcRecordType
 from fastwarc.stream_io import GZipStream
@@ -20,6 +20,8 @@ import concurrent.futures
 import os
 from tqdm import tqdm
 import tempfile
+from transformers import AutoTokenizer
+import numpy as np
 
 parser = argparse.ArgumentParser()
 parser.add_argument("input", help="the input WARC WET file")
@@ -113,9 +115,9 @@ def remove_neardups(input_files: list[pathlib.Path], output_file: pathlib.Path):
 
     with output_file.open("wb") as f_out:
         writer = GZipStream(f_out)
-        for record in filtered_records:
+        for record, text in filtered_records:
             increase_counter(stats, "neardup_filtering_after")
-            record.write(writer)
+            modify_and_write_record(record, text.encode("utf8"), writer)
     return stats
 
 def toy_pipeline(input_path: pathlib.Path, output_dir: pathlib.Path):
@@ -154,33 +156,45 @@ def merge_stats(stats_to_update, stats_to_add):
             count = stats_to_update.get(key, 0)
             stats_to_update[key] = count + val
 
+def process_single_wet_file(wet_url: str, output_dir: os.PathLike) -> dict:
+        try:
+            wet_path = download_wet_file(wet_url, output_dir)
+            wet_output_path = wet_path.with_suffix(".filtered.warc.wet.gz")
+            stats = filter_records(wet_path, wet_output_path)
+        except Exception as e:
+            print(f"Error processing {wet_url}: {e}")
+        finally:
+            wet_path.unlink(missing_ok=True)
+        return stats, wet_output_path
+
+
+def tokenize_results(input_file: pathlib.Path, output_file: pathlib.Path):
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    tokens = []
+    for _, text in warc_records([input_file]):
+        tokens += tokenizer.encode(text) + [tokenizer.eos_token_id]
+    ids_array = np.array(tokens, dtype=np.uint16)
+    ids_array.tofile(output_file.as_posix())
+
 def url_pipeline(output_dir: pathlib.Path, max_urls: int):
     wet_urls = get_wet_file_urls()[:max_urls]
     download_dir = output_dir / "downloads"
     download_dir.mkdir(parents=True, exist_ok=True)
-    def process_single_wet_file(wet_url: str, output_dir: os.PathLike) -> dict:
-        wet_path = output_dir / pathlib.Path(wet_url).name
-        wet_output_path = wet_path.with_suffix(".filtered.warc.wet.gz").name
-        try:
-            download_wet_file(wet_url, wet_path)
-            stats = filter_records(wet_path, wet_output_path)
-        finally:
-            shutil.rmtree(wet_path)
-        return stats, wet_output_path
-        
-    # Set up the executor
+    filtered_dup_lines = output_dir / "filtered_dup_lines.warc.wet.gz"
+    jaccard_filtered = output_dir / "filtered_jaccard.warc.wet.gz"
+    tokenized_output = output_dir / "tokenized.bin"
+    stats = {}
+
     num_cpus = len(os.sched_getaffinity(0))
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=num_cpus)
     futures = []
     print(f"Filtering records with {num_cpus} CPUs...")
-    filter_start_time = time.time()
+    filter_start_time = time.perf_counter()
     for i, wet_url in enumerate(wet_urls):
-        print(f"Processing file {i+1}/{len(wet_urls)}: {wet_url}")
         future = executor.submit(process_single_wet_file, wet_url, download_dir)
         futures.append(future)
 
     # Collect results
-    stats = {}
     output_paths = []
     for future in tqdm(concurrent.futures.as_completed(futures), total=len(wet_urls)):
         url_stats, wet_output_path  = future.result()
@@ -190,30 +204,35 @@ def url_pipeline(output_dir: pathlib.Path, max_urls: int):
     for key, val in stats.items():
         if not isinstance(val, list):
             print(f"{key}: {val}")
+    stats["filtering_time_seconds"] = time.perf_counter() - filter_start_time
+
 
     print("Filtering dup lines...")
-    line_filter_start_time = time.time()
-    stats["filtering_time_seconds"] = line_filter_start_time - filter_start_time
-
-    filtered_dup_lines = output_dir / "filtered_dup_lines.warc.wet.gz"
+    line_filter_start_time = time.perf_counter()
     exact_dupes_stats = remove_dup_lines(output_paths, filtered_dup_lines)
     stats.update(exact_dupes_stats)
-
-    print("Filtering neardups...")
-    neardup_filter_start_time = time.time()
-    stats["line_filtering_time_seconds"] = neardup_filter_start_time - filter_start_time
-    jaccard_filtered = output_dir / "filtered_jaccard.warc.wet.gz"
-    neardup_stats = remove_neardups([filtered_dup_lines], jaccard_filtered)
+    stats["line_filtering_time_seconds"] = time.perf_counter() - line_filter_start_time
     
+    print("Filtering neardups...")
+    neardup_filter_start_time = time.perf_counter()
+    neardup_stats = remove_neardups([filtered_dup_lines], jaccard_filtered)
     stats.update(neardup_stats)
-    end_time = time.time()
-    stats["neardup_filter_time_seconds"] = end_time - filter_start_time
+    stats["neardup_filter_time_seconds"] = time.perf_counter() - neardup_filter_start_time
+
+    print("Tokenizing results...")
+    tokenize_start_time = time.perf_counter()
+    tokenize_results(jaccard_filtered, tokenized_output)
+    stats["tokenization_time_seconds"] = time.perf_counter() - tokenize_start_time
+
+    for key, val in stats.items():
+        if not isinstance(val, list):
+            print(f"{key}: {val}")
 
 if __name__ == "__main__":
     args = parser.parse_args()
     input_path = pathlib.Path(args.input)
     output_dir = pathlib.Path(args.output_dir)
-    if args.input_path == "URLS":
+    if args.input == "URLS":
         url_pipeline(output_dir, args.max_urls)
     else:
         toy_pipeline(input_path, output_dir)

@@ -77,11 +77,15 @@ def main(cfg: Config) -> None:
     )
     pprint(model)
 
+    rank = os.environ.get("RANK", -1)
+    print(f"Rank: {rank}")
+
     # Wrap model in DDP, if we're using it.
     is_ddp = int(os.environ.get("RANK", -1)) != -1
     if is_ddp:
         init_process_group(backend="nccl")
         ddp_rank = int(os.environ["RANK"])
+        print(f"DDP rank: {ddp_rank}")
         ddp_local_rank = int(os.environ["LOCAL_RANK"])
         ddp_world_size = int(os.environ["WORLD_SIZE"])
         device = f"cuda:{ddp_local_rank}"

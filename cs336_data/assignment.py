@@ -11,6 +11,8 @@ import nltk
 import mmh3
 from collections import Counter, defaultdict
 from collections.abc import Callable, Generator
+import concurrent.futures
+from tqdm import tqdm
 
 
 _DATA_PATH = (pathlib.Path(__file__).resolve().parent.parent) / "data"
@@ -130,6 +132,8 @@ def exact_line_dedup_files(
             f_out.write(filtered_text)
 
 def get_minhash(ngrams: list[str], num_hashes: int) -> list[int]:
+    if not ngrams:
+        return None
     result = []
     for i in range(num_hashes):
         min_hash = min(mmh3.hash(ngram, seed=i) for ngram in ngrams)
@@ -159,19 +163,51 @@ def get_ngrams(text: str, ngram_len: int) -> list[str]:
     ngrams = set(tuple(tokens[i:i+ngram_len]) for i in range(len(tokens)-ngram_len+1))
     return [" ".join(ngram) for ngram in ngrams]
 
+def texts_to_hash(texts, ngram_len, num_hashes, chunk_num) -> tuple[int, list[list[int]]]:
+    return chunk_num, [get_minhash(get_ngrams(text, ngram_len), num_hashes) for text in texts]
+
+def get_minhashes(input_records, num_hashes, ngram_len, chunk_size):
+    num_cpus = len(os.sched_getaffinity(0))
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=num_cpus)
+    futures = []
+    print(f"Computing min hashes with {num_cpus} CPUs...")
+    records_stream = input_records()
+    chunk_num = 0
+    at_end = False
+    while not at_end:
+        texts = []
+        for _ in range(chunk_size):
+            try:
+                _, text = next(records_stream)
+                texts.append(text)
+            except StopIteration:
+                at_end = True
+                break
+        if texts:
+            future = executor.submit(texts_to_hash, texts, ngram_len, num_hashes, chunk_num)
+            futures.append(future)
+            chunk_num += 1
+
+    hash_chunks = []
+    for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
+        chunk_num, hash_list = future.result()
+        hash_chunks.append((chunk_num, hash_list))
+    sorted_chunks = sorted(hash_chunks, key=lambda x: x[0])
+    hashes = []
+    for _, hash_list in sorted_chunks:
+        hashes += hash_list
+    return hashes
+
+
 def minhash_deduplication_from_records(
         input_records: Callable[[], Generator[tuple[object, str], None, None]],
         num_hashes: int,
         num_bands: int,
         ngram_len: int,
-        jaccard_threshold: float) -> Generator[object, None, None]:
-        hashes = []
-        for _, content in input_records():
-            ngrams = get_ngrams(content, ngram_len)
-            if not ngrams:
-                hashes.append(None)
-            else:
-                hashes.append(get_minhash(ngrams, num_hashes))
+        jaccard_threshold: float,
+        chunk_size: int = 100) -> Generator[tuple[object, str], None, None]:
+
+        hashes = get_minhashes(input_records, num_hashes, ngram_len, chunk_size)
         
         hash_tables = [defaultdict(list) for _ in range(num_bands)]
         band_length = num_hashes // num_bands
@@ -201,7 +237,7 @@ def minhash_deduplication_from_records(
         connected_components(graph, id_to_cc)
 
         cc_taken = set()
-        for id, (record_metadata, _) in enumerate(input_records()):
+        for id, (record_metadata, record_text) in enumerate(input_records()):
             hash = hashes[id]
             if hash is None:
                 continue
@@ -211,7 +247,7 @@ def minhash_deduplication_from_records(
                     cc_taken.add(cc)
                 else:
                     continue
-            yield record_metadata
+            yield (record_metadata, record_text)
 
 def minhash_deduplication_from_files(input_files: list[os.PathLike],
                           num_hashes: int,
